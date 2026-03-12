@@ -1,0 +1,48 @@
+{
+  "name": "@HTMLgtMK/redis-tcp-channel",
+  "version": "1.0.0",
+  "description": "Redis TCP Channel - Reliable messaging with TCP-like protocol",
+  "main": "dist/plugin.js",
+  "types": "dist/index.d.ts",
+  "openclaw": {
+    "extensions": [
+      "dist/plugin.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "node test/test-tcp-stack.js",
+    "lint": "eslint src --ext .ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "channel",
+    "redis",
+    "tcp",
+    "reliable-messaging"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "ioredis": "^5.10.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/uuid": "^9.0.0",
+    "commander": "^11.0.0",
+    "openclaw": "^2026.3.2",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,0 +1,191 @@
+# Redis-Channel 插件修复 - 完整修改汇总
+
+## 修改概述
+
+为了解决 `openclaw message send` CLI 命令无法发送消息到 redis-channel 的问题（报错 "Outbound not configured for channel: redis-channel"），进行了以下修改。
+
+---
+
+## 文件 1: src/index.ts
+
+### 修改位置 1: 添加 messaging.targetResolver (约第 56-68 行)
+
+**目的**: 让 OpenClaw CLI 能够识别 `node-*` 格式的设备 ID 为有效目标
+
+```diff
+   capabilities: {
+     chatTypes: ['direct', 'group'],
+     reactions: false,
+     edit: false,
+     unsend: false,
+     reply: false,
+     effects: false,
+     groupManagement: false,
+     threads: false,
+     media: false,
+     nativeCommands: false,
+     blockStreaming: false,
+     polls: false,
+   } as ChannelCapabilities,
+ 
++  messaging: {
++    targetResolver: {
++      hint: "Use device ID (e.g., 'node-sub-1', 'node-parent')",
++      looksLikeId: (raw: string, normalized?: string): boolean => {
++        const trimmed = raw.trim();
++        if (!trimmed) return false;
++        if (/^node-/.test(trimmed)) return true;
++        if (/^[a-zA-Z0-9_-]+$/.test(trimmed)) return true;
++        return false;
++      },
++    },
++  },
++
+   configSchema: {
+```
+
+### 修改位置 2: 添加 outbound.textChunkLimit (约第 162 行)
+
+**目的**: 确保 outbound 适配器被 OpenClaw 正确识别
+
+```diff
+   outbound: {
+     deliveryMode: 'direct',
++    textChunkLimit: 10000,
+ 
+     resolveTarget: (params: {
+```
+
+---
+
+## 文件 2: src/plugin.ts
+
+### 完整修改
+
+**目的**: 明确导出 outbound 适配器，确保兼容性
+
+```diff
+ // Redis Channel 插件包装器
+ // 提供 PluginRuntime 访问能力
+ 
+ import type { ChannelPlugin, OpenClawPluginApi } from 'openclaw/plugin-sdk';
+ import { emptyPluginConfigSchema } from 'openclaw/plugin-sdk';
+ import { redisChannelPlugin } from './index';
+ import { setPluginRuntime } from './lib/runtime';
+ 
+ const plugin = {
+   id: 'redis-channel',
+   name: 'Redis Channel',
+   description: 'Redis Pub/Sub messaging channel for OpenClaw',
++  version: '1.1.3',
+   configSchema: emptyPluginConfigSchema(),
+   register(api: OpenClawPluginApi) {
+     // 保存 PluginRuntime 供 channel 使用
+     setPluginRuntime(api.runtime);
+-    // 注册 channel 插件
+-    api.registerChannel({ plugin: redisChannelPlugin as ChannelPlugin });
++    
++    // 兼容新旧版本：直接传递完整插件对象
++    // 新版本 OpenClaw 期望 plugin 对象包含所有属性
++    // 旧版本可能只读取部分属性
++    const channelPlugin: ChannelPlugin = {
++      id: redisChannelPlugin.id,
++      meta: redisChannelPlugin.meta,
++      capabilities: redisChannelPlugin.capabilities,
++      messaging: redisChannelPlugin.messaging,
++      configSchema: redisChannelPlugin.configSchema,
++      config: redisChannelPlugin.config,
++      outbound: redisChannelPlugin.outbound,
++      gateway: redisChannelPlugin.gateway,
++    };
++    
++    // 注册 channel 插件
++    api.registerChannel({ plugin: channelPlugin });
+   },
+ };
+ 
+ export default plugin;
+```
+
+---
+
+## 文件 3: openclaw.plugin.json
+
+### 修改位置: 添加 outbound 元数据 (约第 13 行)
+
+**目的**: 在插件元数据中声明 outbound 能力
+
+```diff
+   "keywords": ["channel", "redis", "pubsub", "messaging"],
+   "minOpenClawVersion": "1.0.0",
++  "outbound": {
++    "textChunkLimit": 10000,
++    "deliveryMode": "direct"
++  },
+   "configSchema": {
+```
+
+同时更新了 version 从 `1.1.2` 到 `1.1.3`。
+
+---
+
+## 编译和测试
+
+### 编译命令
+```bash
+cd /home/admin/.openclaw/extensions/redis-channel
+npm run build
+```
+
+### 重启 Gateway
+```bash
+openclaw gateway restart
+```
+
+### 测试命令
+```bash
+# Dry-run 测试（应该成功）
+openclaw message send \
+  --channel redis-channel \
+  --account default \
+  --target node-sub-1 \
+  --message "测试" \
+  --dry-run
+
+# 实际发送（可能仍报错，见下方说明）
+openclaw message send \
+  --channel redis-channel \
+  --account default \
+  --target node-sub-1 \
+  --message "测试消息"
+```
+
+---
+
+## 当前状态
+
+### ✅ 已修复
+1. **目标解析**: `node-sub-1` 等设备 ID 现在可以被 CLI 识别
+2. **Dry-run 测试**: `--dry-run` 模式可以成功发送消息
+3. **Redis 消息发布**: 消息可以成功发布到 Redis
+
+### ⚠️ 待解决
+CLI 实际发送仍可能报 "Outbound not configured" 错误，这是因为：
+- OpenClaw CLI (2026.3.2) 与插件 SDK 版本可能存在兼容性问题
+- 插件注册表加载逻辑可能因版本差异而不同
+
+### 替代方案
+使用 Redis CLI 直接发送消息（绕过 OpenClaw CLI）：
+```bash
+redis-cli -h 127.0.0.1 -p 6379 -a "Redis@Parent2026!" \
+  PUBLISH "openclaw:device:node-sub-1" \
+  '{"senderId":"node-parent","senderName":"AiMaster","text":"测试消息","timestamp":1773123600000,"isGroup":false,"messageId":"test-001"}'
+```
+
+---
+
+## 修改日期
+2026-03-10
+
+## 修改者
+GBOT (AI Assistant)

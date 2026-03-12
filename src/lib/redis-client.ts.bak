@@ -1,0 +1,137 @@
+import { createClient, type RedisClientType } from 'redis';
+import { RedisChannelAccountConfig, getSubscribeChannel } from './types';
+
+// 使用 any 类型避免 Redis 泛型类型冲突
+// 这是 redis v4.x 的已知问题，严格类型会导致 Map 存储失败
+type RedisClientAny = any;
+
+export class RedisClientManager {
+  private static clients: Map<string, RedisClientAny> = new Map();
+
+  static async getClient(config: RedisChannelAccountConfig): Promise<RedisClientAny> {
+    const subscribeChannel = getSubscribeChannel(config);
+    const key = `${config.redisUrl}:${subscribeChannel}`;
+
+    if (this.clients.has(key)) {
+      const client = this.clients.get(key)!;
+      if (client.isOpen) return client;
+      // 连接已关闭，清理缓存
+      this.debug(`Connection closed for ${key}, creating new connection...`);
+      this.clients.delete(key);
+    }
+
+    this.debug(`Creating Redis connection: ${config.redisUrl}`);
+    const startTime = Date.now();
+    
+    const client = createClient({
+      url: config.redisUrl,
+      socket: {
+        reconnectStrategy: (retries) => {
+          if (retries > 3) {
+            console.error(`[redis-client] Max retries reached, giving up`);
+            return new Error('Max retries reached');
+          }
+          const delay = Math.min(retries * 50, 2000);
+          this.debug(`Reconnecting (attempt ${retries}) in ${delay}ms...`);
+          return delay;
+        },
+        connectTimeout: 3000  // 3 秒超时
+      }
+    });
+
+    client.on('error', (err: Error) => {
+      console.error(`[redis-client] Error: ${err.message}`);
+    });
+    client.on('connect', () => {
+      const elapsed = Date.now() - startTime;
+      console.log(`[redis-client] ✅ Connected to ${config.redisUrl} (${elapsed}ms)`);
+    });
+    client.on('end', () => {
+      this.debug(`Disconnected from ${config.redisUrl}`);
+    });
+    client.on('reconnecting', () => {
+      this.debug(`Reconnecting to ${config.redisUrl}...`);
+    });
+
+    try {
+      await client.connect();
+      const elapsed = Date.now() - startTime;
+      this.debug(`Connection established in ${elapsed}ms`);
+    } catch (err) {
+      const elapsed = Date.now() - startTime;
+      console.error(`[redis-client] ❌ Connection failed after ${elapsed}ms: ${err instanceof Error ? err.message : err}`);
+      throw err;
+    }
+    
+    this.clients.set(key, client);
+
+    return client;
+  }
+
+  private static debug(message: string): void {
+    // Debug logs - only shown when DEBUG env var is set
+    if (process.env.DEBUG?.includes('redis-channel')) {
+      console.log(`[redis-client-debug] ${message}`);
+    }
+  }
+
+  static async createSubscriber(config: RedisChannelAccountConfig): Promise<RedisClientAny> {
+    const mainClient = await this.getClient(config);
+    const subscriber = mainClient.duplicate({
+      socket: {
+        reconnectStrategy: (retries: number) => {
+          if (retries > 3) {
+            console.error(`[redis-client] Subscriber max retries reached, giving up`);
+            return new Error('Max retries reached');
+          }
+          const delay = Math.min(retries * 50, 2000);
+          this.debug(`Subscriber reconnecting (attempt ${retries}) in ${delay}ms...`);
+          return delay;
+        },
+        connectTimeout: 3000  // 3 秒超时，与主客户端一致
+      }
+    });
+    // duplicate() 创建的客户端需要显式连接
+    if (!subscriber.isOpen) {
+      const startTime = Date.now();
+      this.debug(`Connecting subscriber to ${config.redisUrl}...`);
+      await subscriber.connect();
+      this.debug(`Subscriber connected in ${Date.now() - startTime}ms`);
+    }
+    return subscriber;
+  }
+
+  /**
+   * 关闭 subscriber 客户端
+   */
+  static async closeSubscriber(subscriber: RedisClientAny): Promise<void> {
+    if (subscriber && subscriber.isOpen) {
+      try {
+        await subscriber.quit();
+      } catch (err) {
+        console.error('Failed to close subscriber:', err);
+      }
+    }
+  }
+
+  static async closeAll(): Promise<void> {
+    for (const [key, client] of this.clients) {
+      try {
+        if (client.isOpen) await client.quit();
+      } catch (err) {
+        console.error(`Failed to close Redis client ${key}:`, err);
+      }
+    }
+    this.clients.clear();
+  }
+
+  static async closeClient(config: RedisChannelAccountConfig): Promise<void> {
+    const subscribeChannel = getSubscribeChannel(config);
+    const key = `${config.redisUrl}:${subscribeChannel}`;
+    const client = this.clients.get(key);
+    if (client && client.isOpen) {
+      await client.quit();
+      this.clients.delete(key);
+    }
+  }
+}
